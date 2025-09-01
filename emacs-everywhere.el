@@ -34,9 +34,6 @@
   'emacs-everywhere-paste-p 'emacs-everywhere-paste-command "0.1.0")
 (defalias 'emacs-everywhere-call 'emacs-everywhere--call)
 (make-obsolete 'emacs-everywhere-call "Now private API" "0.2.0")
-(define-obsolete-variable-alias
-  'emacs-everywhere-return-converted-org-to-gfm
-  'emacs-everywhere-convert-org-to-gfm "0.2.0")
 (defvaralias 'emacs-everywhere-mode-initial-map 'emacs-everywhere--initial-mode-map)
 (make-obsolete-variable 'emacs-everywhere-mode-initial-map "Now private API" "0.2.0")
 (defalias 'emacs-everywhere-erase-buffer 'emacs-everywhere--erase-buffer)
@@ -84,21 +81,6 @@ When nil, nothing is executed, and pasting is not attempted."
   :type '(set (repeat string) (const nil))
   :group 'emacs-everywhere)
 
-(defcustom emacs-everywhere-markdown-windows
-  '("Reddit" "Stack Exchange" "Stack Overflow" ; Sites
-    "Discord" "Element" "Slack" "HedgeDoc" "HackMD" "Zulip" ; Web Apps
-    "Pull Request" "Issue" "Comparing .*\\.\\.\\.") ; Github
-  "For use with `emacs-everywhere-markdown-p'.
-Patterns which are matched against the window title."
-  :type '(repeat string)
-  :group 'emacs-everywhere)
-
-(defcustom emacs-everywhere-markdown-apps
-  '("Discord" "Element" "Fractal" "NeoChat" "Slack")
-  "For use with `emacs-everywhere-markdown-p'.
-Patterns which are matched against the app name."
-  :type '(repeat string)
-  :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-frame-name-format "Emacs Everywhere :: %s — %s"
   "Format string used to produce the frame name.
@@ -107,18 +89,10 @@ Formatted with the app name, and truncated window name."
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-major-mode-function
-  (cond
-   ((executable-find "pandoc") #'org-mode)
-   ((fboundp 'markdown-mode) #'emacs-everywhere-major-mode-org-or-markdown)
-   (t #'text-mode))
-  "Function which sets the major mode for the Emacs Everywhere buffer.
-
-When set to `org-mode', pandoc is used to convert from markdown to Org
-when applicable."
+  #'text-mode
+  "Function which sets the major mode for the Emacs Everywhere buffer."
   :type 'function
-  :options '(org-mode
-             emacs-everywhere-major-mode-org-or-markdown
-             text-mode)
+  :options '(text-mode)
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-init-hooks
@@ -126,15 +100,13 @@ when applicable."
     emacs-everywhere-set-frame-position
     emacs-everywhere-apply-major-mode
     emacs-everywhere-insert-selection
-    emacs-everywhere-remove-trailing-whitespace
-    emacs-everywhere-init-spell-check)
+    emacs-everywhere-remove-trailing-whitespace)
   "Hooks to be run before function `emacs-everywhere-mode'."
   :type 'hook
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-final-hooks
-  '(emacs-everywhere-convert-org-to-gfm
-    emacs-everywhere-remove-trailing-whitespace)
+  '(emacs-everywhere-remove-trailing-whitespace)
   "Hooks to be run just before content is copied."
   :type 'hook
   :group 'emacs-everywhere)
@@ -169,11 +141,6 @@ Set to nil to disable."
   :type '(repeat regexp)
   :group 'emacs-everywhere)
 
-(defcustom emacs-everywhere-pandoc-md-args
-  '("-f" "markdown-auto_identifiers" "-t" "org")
-  "Arguments supplied to pandoc when converting text from Markdown to Org."
-  :type '(repeat string)
-  :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-clipboard-sleep-delay
   (cond
@@ -222,12 +189,6 @@ emacs-everywhere--app-info-* functions for reference."
 
 ;; Make the byte-compiler happier
 
-(declare-function org-in-src-block-p "org")
-(declare-function org-ctrl-c-ctrl-c "org")
-(declare-function org-export-to-buffer "ox")
-(declare-function evil-insert-state "evil-states")
-(declare-function spell-fu-buffer "spell-fu")
-(declare-function markdown-mode "markdown-mode")
 
 ;;; Primary functionality
 
@@ -335,12 +296,9 @@ buffers.")
   (delete-region (point-min) (point-max)))
 
 (defun emacs-everywhere--finish-or-ctrl-c-ctrl-c ()
-  "Finish emacs-everywhere session or invoke `org-ctrl-c-ctrl-c' in `org-mode'."
+  "Finish emacs-everywhere session."
   (interactive)
-  (if (and (eq major-mode 'org-mode)
-           (org-in-src-block-p))
-      (org-ctrl-c-ctrl-c)
-    (emacs-everywhere-finish)))
+  (emacs-everywhere-finish))
 
 (defun emacs-everywhere-finish (&optional abort)
   "Copy buffer content, close emacs-everywhere window, and maybe paste.
@@ -555,68 +513,18 @@ return windowTitle"))
         (call-process "osascript" nil nil nil
                       "-e" "tell application \"System Events\" to keystroke \"c\" using command down")
         (sleep-for emacs-everywhere-clipboard-sleep-delay)
-        (yank))))
-  (when (and (eq major-mode 'org-mode)
-             (emacs-everywhere-markdown-p)
-             (executable-find "pandoc"))
-    (apply #'call-process-region
-           (point-min) (point-max) "pandoc"
-           t t t
-           emacs-everywhere-pandoc-md-args)
-    (deactivate-mark) (goto-char (point-max)))
-  (cond ((bound-and-true-p evil-local-mode) (evil-insert-state))))
+        (yank)))))
 
-(defun emacs-everywhere-init-spell-check ()
-  "Run a spell check function on the buffer, using a relevant enabled mode."
-  (cond ((bound-and-true-p spell-fu-mode) (spell-fu-buffer))
-        ((bound-and-true-p flyspell-mode) (flyspell-buffer))))
 
-(defun emacs-everywhere-markdown-p ()
-  "Return t if the original window is recognised as markdown-flavoured."
-  (let ((title (emacs-everywhere-app-title emacs-everywhere-current-app))
-        (class (emacs-everywhere-app-class emacs-everywhere-current-app)))
-    (or (cl-some (lambda (pattern)
-                   (string-match-p pattern title))
-                 emacs-everywhere-markdown-windows)
-        (cl-some (lambda (pattern)
-                   (string-match-p pattern class))
-                 emacs-everywhere-markdown-apps))))
 
-(defun emacs-everywhere-major-mode-org-or-markdown ()
-  "Use markdow-mode, when window is recognised as markdown-flavoured.
-Otherwise use `org-mode'."
-  (if (emacs-everywhere-markdown-p)
-      (markdown-mode)
-    (org-mode)))
 
-(defcustom emacs-everywhere-org-export-options
-  "#+property: header-args :exports both
-#+options: toc:nil\n"
-  "A string inserted at the top of the Org buffer prior to export.
-This is with the purpose of setting #+property and #+options parameters.
-
-Should end in a newline to avoid interfering with the buffer content."
-  :type 'string
-  :group 'emacs-everywhere)
-
-(defvar org-export-show-temporary-export-buffer)
-(defun emacs-everywhere-convert-org-to-gfm ()
-  "When appropriate, convert org buffer to markdown."
-  (when (and (eq major-mode 'org-mode)
-             (emacs-everywhere-markdown-p))
-    (goto-char (point-min))
-    (insert emacs-everywhere-org-export-options)
-    (let (org-export-show-temporary-export-buffer)
-      (require 'ox-md)
-      (org-export-to-buffer (if (featurep 'ox-gfm) 'gfm 'md) (current-buffer)))))
 
 (defun emacs-everywhere--required-executables ()
   "Return a list of cons cells, each giving a required executable and its purpose."
   (let* ((feat-cmds
           (list (cons "paste" emacs-everywhere-paste-command)
                 (cons "copy" emacs-everywhere-copy-command)
-                (cons "focus window" emacs-everywhere-window-focus-command)
-                (list "pandoc conversion" "pandoc")))
+                (cons "focus window" emacs-everywhere-window-focus-command)))
          executable-list)
     (dolist (feat-cmd (delq nil feat-cmds))
       (when (cdr feat-cmd)
