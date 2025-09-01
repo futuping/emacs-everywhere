@@ -13,7 +13,7 @@
 
 ;;; License:
 
-;; This file is part of org-pandoc-import, which is not part of GNU Emacs.
+;; This file is part of emacs-everywhere, which is not part of GNU Emacs.
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;;; Commentary:
@@ -48,9 +48,6 @@
 (defalias 'emacs-everywhere-ensure-oscascript-compiled 'emacs-everywhere--ensure-oscascript-compiled)
 (make-obsolete 'emacs-everywhere-ensure-oscascript-compiled "Now private API" "0.2.0")
 
-(defvar emacs-everywhere--display-server
-  '(quartz . nil)
-  "The detected display server.")
 
 (defcustom emacs-everywhere-paste-command
   (list "osascript" "-e" "tell application \"System Events\" to keystroke \"v\" using command down")
@@ -93,14 +90,14 @@ When nil, nothing is executed, and pasting is not attempted."
     "Pull Request" "Issue" "Comparing .*\\.\\.\\.") ; Github
   "For use with `emacs-everywhere-markdown-p'.
 Patterns which are matched against the window title."
-  :type '(rep string)
+  :type '(repeat string)
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-markdown-apps
   '("Discord" "Element" "Fractal" "NeoChat" "Slack")
   "For use with `emacs-everywhere-markdown-p'.
 Patterns which are matched against the app name."
-  :type '(rep string)
+  :type '(repeat string)
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-frame-name-format "Emacs Everywhere :: %s — %s"
@@ -358,10 +355,11 @@ Never paste content when ABORT is non-nil."
       ;; First ensure text is in kill-ring and system clipboard
       (let ((text (buffer-string)))
         (kill-new text)
-        ;; Use macOS specific clipboard command
+        ;; Use macOS pbcopy to set clipboard
         (when (eq system-type 'darwin)
-          (call-process "osascript" nil nil nil
-                       "-e" (format "set the clipboard to %S" text)))
+          (with-temp-buffer
+            (insert text)
+            (call-process-region (point-min) (point-max) "pbcopy")))
         ;; Also try GUI selection methods
         (gui-select-text text)
         (gui-backend-set-selection 'PRIMARY text))
@@ -528,7 +526,7 @@ return windowTitle"))
 
 (defun emacs-everywhere-remove-trailing-whitespace ()
   "Move point to the end of the buffer, and remove all trailing whitespace."
-  (goto-char (max-char))
+  (goto-char (point-max))
   (delete-trailing-whitespace)
   (delete-char (- (skip-chars-backward "\n"))))
 
@@ -540,46 +538,6 @@ return windowTitle"))
                         (- y 50))))
 
 
-(defun emacs-everywhere-insert-selection ()
-  "Insert the last text selection into the buffer."
-  (pcase system-type
-    ('darwin (progn
-               ;; Try to get selected text directly via AppleScript
-               (let ((selection
-                      (with-temp-buffer
-                        (call-process "osascript" nil t nil
-                                    "-e" "tell application \"System Events\"
-                                           set frontApp to first application process whose frontmost is true
-                                           set frontAppBundleId to bundle identifier of frontApp
-                                         end tell
-                                         set theSelection to \"\"
-                                         tell application id frontAppBundleId
-                                           try
-                                             set theSelection to selection
-                                             if theSelection is not \"\" then
-                                               return theSelection
-                                             end if
-                                           end try
-                                         end tell")
-                        (buffer-string))))
-                 ;; If direct selection fails, fall back to clipboard
-                 (if (and selection (not (string-empty-p selection)))
-                     (insert selection)
-                   (progn
-                     (call-process "osascript" nil nil nil
-                                  "-e" "tell application \"System Events\" to keystroke \"c\" using command down")
-                     (sleep-for emacs-everywhere-clipboard-sleep-delay)
-                     (yank))))))
-    )
-  (when (and (eq major-mode 'org-mode)
-             (emacs-everywhere-markdown-p)
-             (executable-find "pandoc"))
-    (apply #'call-process-region
-           (point-min) (point-max) "pandoc"
-           t t t
-           emacs-everywhere-pandoc-md-args)
-    (deactivate-mark) (goto-char (point-max)))
-  (cond ((bound-and-true-p evil-local-mode) (evil-insert-state))))
 
 ;; macOS-only override of insert-selection to remove non-macOS code paths
 (defun emacs-everywhere-insert-selection ()
