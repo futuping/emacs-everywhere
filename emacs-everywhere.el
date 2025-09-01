@@ -24,6 +24,7 @@
 
 (require 'cl-lib)
 (require 'server)
+(require 'subr-x)
 
 (defgroup emacs-everywhere ()
   "Customise group for Emacs-everywhere."
@@ -42,41 +43,17 @@
 (make-obsolete 'emacs-everywhere-erase-buffer "Now private API" "0.2.0")
 (defalias 'emacs-everywhere-finish-or-ctrl-c-ctrl-c 'emacs-everywhere--finish-or-ctrl-c-ctrl-c)
 (make-obsolete 'emacs-everywhere-finish-or-ctrl-c-ctrl-c "Now private API" "0.2.0")
-(defalias 'emacs-everywhere-app-info-linux 'emacs-everywhere--app-info-linux)
-(make-obsolete 'emacs-everywhere-app-info-linux "Now private API" "0.2.0")
 (defalias 'emacs-everywhere-app-info-osx 'emacs-everywhere--app-info-osx)
 (make-obsolete 'emacs-everywhere-app-info-osx "Now private API" "0.2.0")
-(defalias 'emacs-everywhere-app-info-windows 'emacs-everywhere--app-info-windows)
-(make-obsolete 'emacs-everywhere-app-info-windows "Now private API" "0.2.0")
 (defalias 'emacs-everywhere-ensure-oscascript-compiled 'emacs-everywhere--ensure-oscascript-compiled)
 (make-obsolete 'emacs-everywhere-ensure-oscascript-compiled "Now private API" "0.2.0")
 
 (defvar emacs-everywhere--display-server
-  (cond
-   ((eq system-type 'darwin) '(quartz . nil))
-   ((memq system-type '(ms-dos windows-nt cygwin)) '(windows . nil))
-   ((eq system-type 'gnu/linux)
-    (cons
-     (if (getenv "WAYLAND_DISPLAY") 'wayland 'x11)
-     (intern (or (getenv "XDG_CURRENT_DESKTOP") "unknown"))))
-   (t '(unknown . nil)))
+  '(quartz . nil)
   "The detected display server.")
 
 (defcustom emacs-everywhere-paste-command
-  (pcase (car emacs-everywhere--display-server)
-    ('quartz (list "osascript" "-e" "tell application \"System Events\" to keystroke \"v\" using command down"))
-    ('windows
-     (list "powershell" "-NoProfile" "-Command"
-           "& {(New-Object -ComObject wscript.shell).SendKeys(\"^v\")}"))
-    ('x11 (list "xdotool" "key" "--clearmodifiers" "Shift+Insert"))
-    ('wayland (cond ((executable-find "dotool") (list "dotool"))
-                    ;; Note: for ydotool to work you need to have the ydotoold daemon running:
-                    ((executable-find "ydotool") (list "ydotool" "key" "42:1" "110:1" "42:0" "110:0"))
-                    ((executable-find "wtype") (list "wtype" "-M" "Shift" "-P" "Insert" "-m" "Shift" "-p" "Insert"))))
-    ('unknown
-     (list "notify-send"
-           "No paste command defined for emacs-everywhere"
-           "-a" "Emacs" "-i" "emacs")))
+  (list "osascript" "-e" "tell application \"System Events\" to keystroke \"v\" using command down")
   "Command to trigger a system paste from the clipboard.
 This is given as a list in the form (CMD ARGS...).
 
@@ -85,12 +62,7 @@ To not run any command, set to nil."
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-copy-command
-  (pcase (car emacs-everywhere--display-server)
-    ('x11 (list "xclip" "-selection" "clipboard" "%f"))
-    ('wayland
-     (list "sh" "-c" "wl-copy < %f"))
-    ('windows
-     (list "Powershell" "-NoProfile" "-Command" "& { Get-Content %f | clip }")))
+  nil
   "Command to write to the system clipboard from a file (%f).
 This is given as a list in the form (CMD ARGS...).
 In the arguments, \"%f\" is treated as a placeholder for the path
@@ -105,13 +77,7 @@ it worked can be a good idea."
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-window-focus-command
-  (pcase emacs-everywhere--display-server
-    (`(quartz . ,_) (list "osascript" "-e" "tell application id \"%w\" to activate"))
-    (`(windows . ,_) (list "powershell" "-NoProfile" "-command"
-                           "& {Add-Type 'using System; using System.Runtime.InteropServices; public class Tricks { [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); }'; [tricks]::SetForegroundWindow(%w) }"))
-    (`(x11 . ,_) (list "xdotool" "windowactivate" "--sync" "%w"))
-    (`(wayland . sway) (list "swaymsg" "[con_id=%w]" "focus"))
-    (`(wayland . KDE) (list "kdotool" "windowactivate" "%w"))) ; No --sync
+  (list "osascript" "-e" "tell application id \"%w\" to activate")
   "Command to refocus the active window when emacs-everywhere was triggered.
 This is given as a list in the form (CMD ARGS...).
 In the arguments, \"%w\" is treated as a placeholder for the window ID,
@@ -235,12 +201,7 @@ Make sure that it will be matched by `emacs-everywhere-file-patterns'."
   :group 'emacs-everywhere)
 
 (defcustom emacs-everywhere-app-info-function
-  (pcase emacs-everywhere--display-server
-    (`(quartz . ,_) #'emacs-everywhere--app-info-osx)
-    (`(windows . ,_) #'emacs-everywhere--app-info-windows)
-    (`(x11 . ,_) #'emacs-everywhere--app-info-linux-x11)
-    (`(wayland . sway) #'emacs-everywhere--app-info-linux-sway)
-    (`(wayland . KDE) #'emacs-everywhere--app-info-linux-kde))
+  #'emacs-everywhere--app-info-osx
   "Function that asks the system for information on the current foreground app.
 On most systems, this should be set to a sensible default, but it
 may not be set on less common configurations. If unset, a custom
@@ -270,7 +231,6 @@ emacs-everywhere--app-info-* functions for reference."
 (declare-function evil-insert-state "evil-states")
 (declare-function spell-fu-buffer "spell-fu")
 (declare-function markdown-mode "markdown-mode")
-(declare-function w32-shell-execute "w32fns.c")
 
 ;;; Primary functionality
 
@@ -279,12 +239,8 @@ emacs-everywhere--app-info-* functions for reference."
   "Launch the emacs-everywhere frame from emacsclient.
 This may open FILE at a particular LINE and COLUMN, if specified."
   (let* ((app-info (emacs-everywhere-app-info))
-         (param (emacs-everywhere-command-param app-info file line column))
-         (param-string (combine-and-quote-strings param)))
-    (pcase system-type
-      ((or 'ms-dos 'windows-nt 'cygwin)
-       (w32-shell-execute "open" "emacsclientw" param-string 1))
-      (_ (apply #'call-process "emacsclient" nil 0 nil param)))))
+         (param (emacs-everywhere-command-param app-info file line column)))
+    (apply #'call-process "emacsclient" nil 0 nil param)))
 
 (defun emacs-everywhere-command-param (app-info &optional file line column)
   "Generate arguments for calling emacsclient.
@@ -292,26 +248,20 @@ The arguments are based on a particular APP-INFO. Optionally, a FILE can be
 specified, and also a particular LINE and COLUMN."
   (delq
    nil (list
-        (when (server-running-p)
-          (if server-use-tcp
-              (concat "--server-file="
-                      (if (memq system-type '(ms-dos windows-nt cygwin))
-                          (expand-file-name server-name server-auth-dir)
-                        (shell-quote-argument
-                         (expand-file-name server-name server-auth-dir))))
-            (concat "--socket-name="
-                    (if (memq system-type '(ms-dos windows-nt cygwin))
-                        (expand-file-name server-name server-auth-dir)
-                      (shell-quote-argument
-                       (expand-file-name server-name server-socket-dir))))))
+        (when (and (server-running-p) server-use-tcp)
+          (concat "--server-file="
+                  (shell-quote-argument
+                   (expand-file-name server-name server-auth-dir))))
+        (when (and (server-running-p) (not server-use-tcp))
+          (concat "--socket-name="
+                  (shell-quote-argument
+                   (expand-file-name server-name server-socket-dir))))
         "-c" "-F"
         (prin1-to-string
          (cons (cons 'emacs-everywhere-app app-info)
                emacs-everywhere-frame-parameters))
-
         (cond ((and line column) (format "+%d:%d" line column))
               (line              (format "+%d" line)))
-
         (or file
             (expand-file-name
              (funcall emacs-everywhere-filename-function app-info)
@@ -448,9 +398,8 @@ Never paste content when ABORT is non-nil."
           ;; Add small delay before paste
           (sleep-for emacs-everywhere-clipboard-sleep-delay)
           (apply #'call-process (car emacs-everywhere-paste-command)
-                 (if (cdr emacs-everywhere-paste-command) nil
-                   (make-temp-file nil nil nil "key shift+insert")) nil nil
-                   (cdr emacs-everywhere-paste-command)))))
+                 nil nil nil
+                 (cdr emacs-everywhere-paste-command)))))
     ;; Clean up after ourselves in case the buffer survives `server-buffer-done'
     (set-buffer-modified-p nil)
     (let ((kill-buffer-query-functions nil))
@@ -496,110 +445,9 @@ Please go to 'System Preferences > Security & Privacy > Privacy > Accessibility'
       (error "MacOS accessibility error, aborting"))
     (string-trim (buffer-string))))
 
-(defun emacs-everywhere--app-info-linux ()
-  "Return information on the active window, on Linux."
-  (pcase emacs-everywhere--display-server
-    (`(x11 . ,_) (emacs-everywhere--app-info-linux-x11))
-    (`(wayland . KDE) (emacs-everywhere--app-info-linux-kde))
-    (`(wayland . sway) (emacs-everywhere--app-info-linux-sway))
-    (_ (user-error "Unable to fetch app info with display server %S" emacs-everywhere--display-server))))
 
-(declare-function json-read-from-string "json")
 
-(defun emacs-everywhere--app-info-linux-sway ()
-  "Return information on the current active window, on a Linux Sway session."
-  (cl-labels ((find-focused-node (node)
-                (or (and (assq 'type node)
-                         (eq 't (alist-get 'focused node))
-                         node)
-                    (cl-loop for child-node across (alist-get 'nodes node)
-                             thereis (find-focused-node child-node))
-                    (cl-loop for floating-node across (alist-get 'floating_nodes node)
-                             thereis (find-focused-node floating-node)))))
-    (require 'json)
-    (let* ((sway-tree-json (emacs-everywhere--call "swaymsg" "-t" "get_tree"))
-           (sway-tree (json-read-from-string sway-tree-json))
-           (focused-node (find-focused-node sway-tree))
-           (window-id (number-to-string (alist-get 'id focused-node)))
-           (app-name (or (alist-get 'app_id focused-node)
-                         (alist-get 'class (alist-get 'window_properties focused-node))))
-           (window-title (alist-get 'name focused-node))
-           (full-window-geometry (alist-get 'geometry focused-node))
-           (window-geometry (list
-                             (alist-get 'x full-window-geometry)
-                             (alist-get 'y full-window-geometry)
-                             (alist-get 'width full-window-geometry)
-                             (alist-get 'height full-window-geometry))))
-      (make-emacs-everywhere-app
-       :id window-id
-       :class app-name
-       :title window-title
-       :geometry window-geometry))))
 
-(defun emacs-everywhere--app-info-linux-x11 ()
-  "Return information on the current active window, on a Linux X11 sessions."
-  (let ((window-id (emacs-everywhere--call "xdotool" "getactivewindow")))
-    (let ((app-name
-           (car (split-string-and-unquote
-                 (string-trim-left
-                  (emacs-everywhere--call "xprop" "-id" window-id "WM_CLASS")
-                  "[^ ]+ = \"[^\"]+\", "))))
-          (window-title
-           (car (split-string-and-unquote
-                 (string-trim-left
-                  (emacs-everywhere--call "xprop" "-id" window-id "_NET_WM_NAME")
-                  "[^ ]+ = "))))
-          (window-geometry
-           (let ((info (mapcar (lambda (line)
-                                 (split-string line ":" nil "[ \t]+"))
-                               (split-string
-                                (emacs-everywhere--call "xwininfo" "-id" window-id) "\n"))))
-             (mapcar #'string-to-number
-                     (list (cadr (assoc "Absolute upper-left X" info))
-                           (cadr (assoc "Absolute upper-left Y" info))
-                           (cadr (assoc "Relative upper-left X" info))
-                           (cadr (assoc "Relative upper-left Y" info))
-                           (cadr (assoc "Width" info))
-                           (cadr (assoc "Height" info)))))))
-      (setq window-geometry
-            (list
-             (if (= (nth 0 window-geometry) (nth 2 window-geometry))
-                 (nth 0 window-geometry)
-               (- (nth 0 window-geometry) (nth 2 window-geometry)))
-             (if (= (nth 1 window-geometry) (nth 3 window-geometry))
-                 (nth 1 window-geometry)
-               (- (nth 1 window-geometry) (nth 3 window-geometry)))
-             (nth 4 window-geometry)
-             (nth 5 window-geometry)))
-      (make-emacs-everywhere-app
-       :id window-id
-       :class app-name
-       :title window-title
-       :geometry window-geometry))))
-
-(defun emacs-everywhere--app-info-linux-kde ()
-  "Return information on the current active window, on a Linux KDE sessions."
-  (let ((window-id (emacs-everywhere--call "kdotool" "getactivewindow")))
-    (let ((app-name
-           (car (last (split-string (emacs-everywhere--call "kdotool" "getwindowclassname" window-id) "\\."))))
-          (window-title
-           (emacs-everywhere--call "kdotool" "getwindowname" window-id))
-          (window-geometry
-           (let ((geom (mapcar
-                        (lambda (line) (split-string line "[:,x] ?"))
-                        (split-string (string-trim-left
-                                       (emacs-everywhere--call "kdotool" "getwindowgeometry" window-id) "[^P]+")
-                                      "\n" nil " +"))))
-             (mapcar #'string-to-number
-                     (list (cadr (assoc "Position" geom))
-                           (caddr (assoc "Position" geom))
-                           (cadr (assoc "Geometry" geom))
-                           (caddr (assoc "Geometry" geom)))))))
-      (make-emacs-everywhere-app
-       :id window-id
-       :class app-name
-       :title window-title
-       :geometry window-geometry))))
 
 (defvar emacs-everywhere--dir (file-name-directory load-file-name))
 
@@ -666,34 +514,6 @@ return windowTitle"))
         (shell-command (format "osacompile -r scpt:128 -t osas -o %s %s"
                                (car script) (concat (car script) ".applescript")))))))
 
-(defun emacs-everywhere--app-info-windows ()
-  "Return information on the active window, on Windows."
-  (let* ((window-id (emacs-everywhere--call
-                     "powershell"
-                     "-NoProfile"
-                     "-Command"
-                     "& {Add-Type 'using System; using System.Runtime.InteropServices; public class Tricks { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); }'; [tricks]::GetForegroundWindow() }"))
-         (window-title (emacs-everywhere--call
-                        "powershell"
-                        "-NoProfile"
-                        "-Command"
-                        (format "& {Add-Type 'using System; using System.Runtime.InteropServices; public class Tricks { [DllImport(\"user32.dll\")] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count); [DllImport(\"user32.dll\")] public static extern int GetWindowTextLength(IntPtr hWnd); }'; $length = ([tricks]::GetWindowTextLength(%s)); $sb = New-Object System.Text.StringBuilder $length; [tricks]::GetWindowText(%s, $sb, $length + 1) > $null; $sb.ToString() }" window-id window-id)))
-         (window-class (emacs-everywhere--call
-                        "powershell"
-                        "-NoProfile"
-                        "-Command"
-                        (format "(Get-Item (Get-Process | ? { $_.mainwindowhandle -eq %s }).Path).VersionInfo.ProductName" window-id)))
-         (window-geometry (split-string
-                           (emacs-everywhere--call
-                            "powershell"
-                            "-NoProfile"
-                            "-Command"
-                            (format "& {Add-Type 'using System; using System.Runtime.InteropServices; public struct tagRECT { public int left; public int top; public int right; public int bottom; } public class Tricks { [DllImport(\"user32.dll\")] public static extern int GetWindowRect(IntPtr hWnd, out tagRECT lpRect); }'; $rect = New-Object -TypeName tagRECT; [tricks]::GetWindowRect(%s, [ref]$rect) > $null; $rect.left; $rect.top; $rect.right - $rect.left; $rect.bottom - $rect.top }" window-id)))))
-    (make-emacs-everywhere-app
-     :id window-id
-     :class window-class
-     :title window-title
-     :geometry window-geometry)))
 
 ;;; Secondary functionality
 
@@ -719,27 +539,6 @@ return windowTitle"))
                         (- x 100)
                         (- y 50))))
 
-(defun emacs-everywhere-insert-selection--windows ()
-  "Insert selection on MS-Windows by simulating C-c and C-v."
-  (let ((window-id (emacs-everywhere-app-id emacs-everywhere-current-app))
-        (emacs-window-id (emacs-everywhere--call
-                          "powershell"
-                          "-NoProfile"
-                          "-Command"
-                          "& {Add-Type 'using System; using System.Runtime.InteropServices; public class Tricks { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); }'; [tricks]::GetForegroundWindow() }")))
-    (apply #'call-process (car emacs-everywhere-window-focus-command)
-           nil nil nil
-           (mapcar (lambda (arg)
-                     (replace-regexp-in-string "%w" window-id arg))
-                   (cdr emacs-everywhere-window-focus-command)))
-    (apply #'call-process "powershell"
-           nil nil nil '("-NoProfile" "-Command" "& {(New-Object -ComObject wscript.shell).SendKeys('^c')}"))
-    (apply #'call-process (car emacs-everywhere-window-focus-command)
-           nil nil nil
-           (mapcar (lambda (arg)
-                     (replace-regexp-in-string "%w" emacs-window-id arg))
-                   (cdr emacs-everywhere-window-focus-command))))
-  (yank))
 
 (defun emacs-everywhere-insert-selection ()
   "Insert the last text selection into the buffer."
@@ -771,11 +570,34 @@ return windowTitle"))
                                   "-e" "tell application \"System Events\" to keystroke \"c\" using command down")
                      (sleep-for emacs-everywhere-clipboard-sleep-delay)
                      (yank))))))
-    ((or 'ms-dos 'windows-nt 'cygwin)
-     (emacs-everywhere-insert-selection--windows))
-    (_ (when-let ((selection (gui-get-selection 'PRIMARY 'UTF8_STRING)))
-         (gui-backend-set-selection 'PRIMARY "")
-         (insert selection))))
+    )
+  (when (and (eq major-mode 'org-mode)
+             (emacs-everywhere-markdown-p)
+             (executable-find "pandoc"))
+    (apply #'call-process-region
+           (point-min) (point-max) "pandoc"
+           t t t
+           emacs-everywhere-pandoc-md-args)
+    (deactivate-mark) (goto-char (point-max)))
+  (cond ((bound-and-true-p evil-local-mode) (evil-insert-state))))
+
+;; macOS-only override of insert-selection to remove non-macOS code paths
+(defun emacs-everywhere-insert-selection ()
+  "Insert the last text selection into the buffer (macOS only)."
+  ;; Try to get selected text directly via AppleScript
+  (let ((selection
+         (with-temp-buffer
+           (call-process "osascript" nil t nil
+                         "-e" "tell application \"System Events\"\n                                set frontApp to first application process whose frontmost is true\n                                set frontAppBundleId to bundle identifier of frontApp\n                              end tell\n                              set theSelection to \"\"\n                              tell application id frontAppBundleId\n                                try\n                                  set theSelection to selection\n                                  if theSelection is not \"\" then\n                                    return theSelection\n                                  end if\n                                end try\n                              end tell")
+           (buffer-string))))
+    ;; If direct selection fails, fall back to clipboard (Cmd+C then yank)
+    (if (and selection (not (string-empty-p selection)))
+        (insert selection)
+      (progn
+        (call-process "osascript" nil nil nil
+                      "-e" "tell application \"System Events\" to keystroke \"c\" using command down")
+        (sleep-for emacs-everywhere-clipboard-sleep-delay)
+        (yank))))
   (when (and (eq major-mode 'org-mode)
              (emacs-everywhere-markdown-p)
              (executable-find "pandoc"))
@@ -832,30 +654,20 @@ Should end in a newline to avoid interfering with the buffer content."
 
 (defun emacs-everywhere--required-executables ()
   "Return a list of cons cells, each giving a required executable and its purpose."
-  (let* ((var-cmds
+  (let* ((feat-cmds
           (list (cons "paste" emacs-everywhere-paste-command)
                 (cons "copy" emacs-everywhere-copy-command)
                 (cons "focus window" emacs-everywhere-window-focus-command)
                 (list "pandoc conversion" "pandoc")))
-         (de-cmds
-          (pcase emacs-everywhere--display-server
-            (`(x11 . ,_)
-             (list (list "app info" "xdotool")
-                   (list "app info" "xprop")
-                   (list "app info" "xwininfo")))
-            (`(wayland . KDE)
-             (list (list "app info" "kdotool")))))
-         (feat-cmds
-          (append var-cmds de-cmds))
          executable-list)
-      (dolist (feat-cmd (delq nil feat-cmds))
-        (when (cdr feat-cmd)
-          (when (and (equal (cadr feat-cmd) "sh")
-                     (equal (caddr feat-cmd) "-c"))
-            (setcdr feat-cmd (split-string (cadddr feat-cmd))))
-          (push (cons (cadr feat-cmd) (car feat-cmd))
-                executable-list)))
-      executable-list))
+    (dolist (feat-cmd (delq nil feat-cmds))
+      (when (cdr feat-cmd)
+        (when (and (equal (cadr feat-cmd) "sh")
+                   (equal (caddr feat-cmd) "-c"))
+          (setcdr feat-cmd (split-string (cadddr feat-cmd))))
+        (push (cons (cadr feat-cmd) (car feat-cmd))
+              executable-list)))
+    executable-list))
 
 (defun emacs-everywhere-check-health ()
   "Check whether emacs-everywhere has everything it needs."
@@ -869,9 +681,6 @@ Should end in a newline to avoid interfering with the buffer content."
            (emacs-everywhere--required-executables)))
       (insert (propertize "Emacs Everywhere system health check\n" 'face 'outline-1)
               "operating system: " (propertize (symbol-name system-type) 'face 'font-lock-type-face)
-              ", display server: " (propertize (symbol-name (car emacs-everywhere--display-server)) 'face 'font-lock-type-face)
-              (and (cdr emacs-everywhere--display-server)
-                   (concat "/" (propertize (symbol-name (cdr emacs-everywhere--display-server)) 'face 'font-lock-type-face)))
               "\n")
       (dolist (req-cmd required-cmds)
         (if (not (cdr req-cmd))
